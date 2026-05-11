@@ -1,0 +1,9 @@
+curl https://api.gptgod.online/v1/messages \
+  -H "Authorization: Bearer sk-lVdK2WrElm4P9wl7TQxxdylEHTdhA6lmzC1dMbXfVQ9cyauw" \
+  -H "anthropic-version: 2023-06-01" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "gpt-5.1",
+    "max_tokens": 1024,
+    "messages": [{"role": "user", "content": "你好"}]
+  }'
