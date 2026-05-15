@@ -1,6 +1,4 @@
-可以，而且我建议你先走 **“PydanticAI 负责结构化输出 + 你自己执行工具”** 这条路，而不是一上来硬拼原生 tool calling。
-
-原因很简单：
+**“PydanticAI 负责结构化输出 + 你自己执行工具”** 这条路，而不是一上来硬拼原生 tool calling。
 
 - PydanticAI 的 **工具调用** 默认是让模型直接发起 tool call 的，适合原生支持工具的模型。
 - 你的逆向 API 如果只是**纯文本输出**，更稳的方式是用 **`PromptedOutput` + Pydantic 校验 + `ModelRetry`**，让模型先输出一个严格的“计划对象”，然后由你自己的 orchestrator 真正执行工具。
