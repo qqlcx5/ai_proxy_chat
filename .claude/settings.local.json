@@ -3,7 +3,14 @@
     "allow": [
       "Bash(uv --version)",
       "Bash(uv init *)",
-      "Bash(uv add *)"
+      "Bash(uv add *)",
+      "Bash(uv sync *)",
+      "Bash(uv run *)",
+      "Bash(curl -s -X POST http://localhost:8000/v1/messages -H \"Content-Type: application/json\" -d '{\"model\":\"test\",\"messages\":[{\"role\":\"user\",\"content\":\"hello\"}],\"tools\":[{\"name\":\"Bash\",\"description\":\"Run a command\",\"input_schema\":{\"type\":\"object\",\"properties\":{\"command\":{\"type\":\"string\",\"description\":\"The command to run\"}},\"required\":[\"command\"]}}]}')",
+      "Bash(curl -s http://66.154.117.189:3000/v1/models -H \"Authorization: Bearer sk-vxJNsGJnlf3zKzku9hF0S1kx4xgVYmYEbztjjY2ZV4qwVkrk\")",
+      "Bash(python -m json.tool)",
+      "Bash(git reset *)",
+      "Bash(git checkout *)"
     ]
   }
 }
