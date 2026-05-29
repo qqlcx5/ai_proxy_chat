@@ -8,6 +8,7 @@ import os
 import re
 import uuid
 import json
+import logging
 from typing import Literal
 
 from fastapi import FastAPI, Request
@@ -27,9 +28,11 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
+logger = logging.getLogger("gateway")
+
 REVERSE_BASE_URL = os.environ["REVERSE_API_URL"].removesuffix("/chat/completions")
 REVERSE_API_KEY = os.environ["REVERSE_API_KEY"]
-REVERSE_MODEL = os.getenv("REVERSE_API_MODEL", "claude-sonnet-4-6")
+REVERSE_MODEL = os.getenv("REVERSE_API_MODEL", "gpt-5.2")
 GATEWAY_PORT = int(os.getenv("GATEWAY_PORT", "8000"))
 DEBUG = os.getenv("DEBUG_MODE", "false").lower() == "true"
 
@@ -225,8 +228,14 @@ async def handle_messages(request: Request):
     system = body.get("system", "") or ""
     model_id = body.get("model", REVERSE_MODEL)
 
-    if DEBUG:
-        print(f"[DEBUG] tools={[t['name'] for t in tools]}  msgs={len(msgs)}")
+    logger.info(
+        ">>> request  model=%s  tools=%d  messages=%d",
+        model_id,
+        len(tools),
+        len(msgs),
+    )
+    if tools:
+        logger.debug("  tool names: %s", [t.get("name") for t in tools])
 
     system_prompt = _tools_to_system(
         tools, system if isinstance(system, str) else ""
@@ -236,24 +245,48 @@ async def handle_messages(request: Request):
     if not last_prompt:
         last_prompt = "Continue."
 
+    logger.debug(
+        "  history turns=%d  last_prompt=%s",
+        len(history),
+        last_prompt[:120] + ("..." if len(last_prompt) > 120 else ""),
+    )
+
     provider = OpenAIProvider(
         base_url=REVERSE_BASE_URL, api_key=REVERSE_API_KEY
     )
     model = OpenAIChatModel(REVERSE_MODEL, provider=provider)
-    # output_type=str — we parse the raw text ourselves
     agent = Agent(model, output_type=str, system_prompt=system_prompt)
 
     result = await agent.run(last_prompt, message_history=history)
     raw = result.output
 
-    if DEBUG:
-        print(f"[DEBUG] raw={raw[:200]!r}")
+    logger.debug("  raw response (%d chars): %.200s", len(raw), raw)
 
     output = _parse_output(raw)
+    if isinstance(output, ToolCallOutput):
+        logger.info(
+            "<<< response tool_call  name=%s  args_keys=%s",
+            output.name,
+            list(output.arguments.keys()) if output.arguments else [],
+        )
+    else:
+        logger.info(
+            "<<< response text (%d chars): %.120s",
+            len(output.text),
+            output.text + ("..." if len(output.text) > 120 else ""),
+        )
     return JSONResponse(_to_anthropic_response(output, model_id))
 
 
 if __name__ == "__main__":
     import uvicorn
 
+    logging.basicConfig(
+        level=logging.DEBUG if DEBUG else logging.INFO,
+        format="%(asctime)s [%(levelname)s] %(message)s",
+        datefmt="%H:%M:%S",
+    )
+    logger.info(
+        "Starting gateway on :%d  model=%s", GATEWAY_PORT, REVERSE_MODEL
+    )
     uvicorn.run(app, host="0.0.0.0", port=GATEWAY_PORT)
