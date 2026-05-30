@@ -1,13 +1,21 @@
 """Protocol-conversion gateway: Anthropic ↔ OpenAI-compatible (via PydanticAI).
 
-Enhanced with:
-  1. Agentic loop (tool call → execute → feedback → repeat, max 5 rounds)
-  2. Robust parser (fenced/bare JSON/XML/legacy XML + fuzzy repair)
-  3. Complete tool set (read, write, edit, exec, web_search, web_fetch)
-  4. Example-based prompt injection (from openclaw-zero-token)
-  5. Keyword heuristic for selective tool prompt injection
+协议转换网关：将 Anthropic Messages API 兼容请求转换为 OpenAI 格式，
+并通过逆向 API（纯文本模型）实现完整的工具调用能力。
 
-Ported from openclaw-zero-token TypeScript implementation.
+核心设计：
+  - 逆向 API 按纯文本对话模式处理，不依赖原生 tool calling
+  - Gateway 端负责：prompt 注入 → 解析工具调用 → 执行工具 → 反馈结果 → 循环
+  - 类似 Claude Code 的 agentic loop 模式
+
+增强功能：
+  1. Agentic loop — tool call → 执行 → 反馈给模型 → 循环（最多 MAX_TOOL_ROUNDS 轮）
+  2. 健壮解析器 — 支持 fenced JSON / bare JSON / XML / legacy XML / fuzzy repair
+  3. 完整工具集 — read, write, edit, exec, web_search, web_fetch
+  4. Example-based prompt injection — 用示例教会模型输出正确格式
+  5. 关键词启发 — 仅在用户消息涉及工具相关意图时注入工具提示
+
+移植自 openclaw-zero-token TypeScript 实现。
 """
 
 import asyncio
@@ -38,7 +46,14 @@ load_dotenv()
 
 logger = logging.getLogger("gateway")
 
-# ── Config ──────────────────────────────────────────────────────────────────
+# ── 配置区 ─────────────────────────────────────────────────────
+# 所有可通过环境变量覆盖的配置项，集中在此管理
+# REVERSE_BASE_URL: 逆向 API 的基础地址（不含 /chat/completions 后缀）
+# REVERSE_API_KEY:  逆向 API 密钥
+# REVERSE_MODEL:    模型名称，默认 gpt-5.2
+# MAX_TOOL_ROUNDS:  agentic loop 最大轮数，防止无限循环
+# EXEC_TIMEOUT:     命令执行超时（秒）
+# WORKSPACE:        工具执行的工作目录
 
 REVERSE_BASE_URL = os.environ["REVERSE_API_URL"].removesuffix("/chat/completions")
 REVERSE_API_KEY = os.environ["REVERSE_API_KEY"]
