@@ -25,7 +25,8 @@
       "Bash(curl -s --max-time 20 -X POST http://127.0.0.1:8000/v1/messages -H 'Content-Type: application/json' -H 'x-api-key: test-key' -H 'anthropic-version: 2023-06-01' -d '{\"model\":\"gpt-5.2\",\"max_tokens\":128,\"messages\":[{\"role\":\"user\",\"content\":\"Say hello in one sentence.\"}]}')",
       "Bash(curl -s --max-time 20 -X POST http://127.0.0.1:8000/v1/messages -H 'Content-Type: application/json' -H 'x-api-key: test-key' -H 'anthropic-version: 2023-06-01' -d '{\"model\":\"gpt-5.2\",\"max_tokens\":256,\"tools\":[{\"name\":\"get_weather\",\"description\":\"Get weather for a city\",\"input_schema\":{\"type\":\"object\",\"properties\":{\"city\":{\"type\":\"string\"}},\"required\":[\"city\"]}}],\"messages\":[{\"role\":\"user\",\"content\":\"北京今天天气怎么样？\"}]}')",
       "Bash(curl *)",
-      "Bash(D:/Desktop/chat-online/.venv/Scripts/python.exe -c \"import pydantic_ai; print\\('pydantic_ai OK'\\)\")"
+      "Bash(D:/Desktop/chat-online/.venv/Scripts/python.exe -c \"import pydantic_ai; print\\('pydantic_ai OK'\\)\")",
+      "Bash(python -c ' *)"
     ]
   }
 }
