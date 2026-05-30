@@ -1,19 +1,27 @@
 """Protocol-conversion gateway: Anthropic ↔ OpenAI-compatible (via PydanticAI).
 
-PydanticAI handles the API call; we handle output parsing ourselves
-because the reverse API returns plain text, not structured JSON.
+Enhanced with:
+  1. Agentic loop (tool call → execute → feedback → repeat, max 5 rounds)
+  2. Robust parser (fenced/bare JSON/XML/legacy XML + fuzzy repair)
+  3. Complete tool set (read, write, edit, exec, web_search, web_fetch)
+  4. Example-based prompt injection (from openclaw-zero-token)
+  5. Keyword heuristic for selective tool prompt injection
+
+Ported from openclaw-zero-token TypeScript implementation.
 """
 
+import asyncio
 import os
 import re
 import uuid
 import json
 import logging
-from typing import Literal
+import urllib.request
+import urllib.parse
+from pathlib import Path
 
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel, Field, ValidationError
 from pydantic_ai import Agent
 from pydantic_ai.models.openai import OpenAIChatModel
 from pydantic_ai.providers.openai import OpenAIProvider
@@ -30,44 +38,181 @@ load_dotenv()
 
 logger = logging.getLogger("gateway")
 
+# ── Config ──────────────────────────────────────────────────────────────────
+
 REVERSE_BASE_URL = os.environ["REVERSE_API_URL"].removesuffix("/chat/completions")
 REVERSE_API_KEY = os.environ["REVERSE_API_KEY"]
 REVERSE_MODEL = os.getenv("REVERSE_API_MODEL", "gpt-5.2")
 GATEWAY_PORT = int(os.getenv("GATEWAY_PORT", "8000"))
 DEBUG = os.getenv("DEBUG_MODE", "false").lower() == "true"
+MAX_TOOL_ROUNDS = int(os.getenv("MAX_TOOL_ROUNDS", "5"))
+EXEC_TIMEOUT = int(os.getenv("EXEC_TIMEOUT", "30"))
+WORKSPACE = Path(os.getenv("WORKSPACE", str(Path.cwd())))
 
 app = FastAPI()
 
-# ── Output schema ──────────────────────────────────────────────────────────────
+# ── Tool call parser (ported from openclaw) ────────────────────────────────
 
+# 1. Fenced: ```tool_json\n{"tool":"...","parameters":{...}}\n```
+_FENCED_RE = re.compile(r"```tool_json\s*\n?\s*(\{[\s\S]*?\})\}?\s*\n?\s*```")
 
-class ToolCallOutput(BaseModel):
-    kind: Literal["tool_call"] = "tool_call"
-    name: str
-    arguments: dict = Field(default_factory=dict)
+# 2. Bare JSON: {"tool":"...","parameters":{...}}
+_BARE_RE = re.compile(
+    r'\{\s*"tool"\s*:\s*"([^"]+)"\s*,\s*"parameters"\s*:\s*(\{[\s\S]*?\})\s*\}'
+)
 
+# 3. XML: <tool_call>{"name":"...","arguments":{...}}</tool_call>
+_XML_RE = re.compile(r"<tool_call[^>]*>([\s\S]*?)</tool_call>")
 
-class TextOutput(BaseModel):
-    kind: Literal["text"] = "text"
-    text: str
-
-
-# ── Helpers ────────────────────────────────────────────────────────────────────
-
-# Regex for extracting tool calls from model output.
-# Supports both XML format (<tool_call_request>...</tool_call_request>)
-# and JSON format ({"kind":"tool_call",...}).
-XML_RE = re.compile(
+# 4. Legacy XML: <tool_call_request>...</tool_call_request>
+_LEGACY_XML_RE = re.compile(
     r"<tool_call_request>\s*<name>([^<]+)</name>\s*<arguments>([^<]*)</arguments>\s*</tool_call_request>",
     re.DOTALL,
 )
-JSON_RE = re.compile(
-    r'\{\s*"kind"\s*:\s*"tool_call"\s*,\s*"name"\s*:\s*"([^"]+)"\s*,\s*"arguments"\s*:\s*(\{[^}]*\})\s*\}',
-    re.DOTALL,
+
+
+def _parse_tool_json(raw: str) -> dict | None:
+    """Parse tool JSON with auto-repair for unbalanced braces."""
+    try:
+        cleaned = raw.strip()
+        # Auto-repair: if JSON has unbalanced braces, append }
+        opens = cleaned.count("{")
+        closes = cleaned.count("}")
+        if opens > closes:
+            cleaned += "}" * (opens - closes)
+        obj = json.loads(cleaned)
+
+        # ComfyUI format: {"tool":"name","parameters":{...}}
+        if obj.get("tool") and isinstance(obj["tool"], str):
+            return {"name": obj["tool"], "arguments": obj.get("parameters", {})}
+
+        # OpenAI format: {"name":"...","arguments":{...}}
+        if obj.get("name") and isinstance(obj["name"], str):
+            return {"name": obj["name"], "arguments": obj.get("arguments", {})}
+
+        return None
+    except json.JSONDecodeError:
+        return None
+
+
+def extract_tool_call(text: str) -> dict | None:
+    """Extract tool call from text. Returns {"name": str, "arguments": dict} or None.
+
+    Supports (in priority order):
+    1. Fenced code block: ```tool_json ... ```
+    2. Bare JSON with "tool"/"parameters" keys
+    3. XML <tool_call> tags
+    4. Legacy <tool_call_request> XML format
+    5. Fuzzy repair for truncated JSON
+    """
+    # 1. Fenced format
+    m = _FENCED_RE.search(text)
+    if m:
+        result = _parse_tool_json(m.group(1))
+        if result:
+            return result
+
+    # 2. Bare JSON
+    m = _BARE_RE.search(text)
+    if m:
+        try:
+            arguments = json.loads(m.group(2))
+            return {"name": m.group(1), "arguments": arguments}
+        except json.JSONDecodeError:
+            pass
+
+    # 3. XML tool_call
+    m = _XML_RE.search(text)
+    if m:
+        result = _parse_tool_json(m.group(1))
+        if result:
+            return result
+
+    # 4. Legacy XML format
+    m = _LEGACY_XML_RE.search(text)
+    if m:
+        name = m.group(1).strip()
+        try:
+            args = json.loads(m.group(2).strip())
+        except json.JSONDecodeError:
+            args = {}
+        return {"name": name, "arguments": args}
+
+    # 5. Fuzzy repair: truncated JSON from SSE
+    m = re.search(
+        r'\{\s*"tool"\s*:\s*"([^"]+)"\s*,\s*"parameters"\s*:\s*\{([^}]*)\}', text
+    )
+    if m:
+        repaired = f'{{"tool":"{m.group(1)}","parameters":{{{m.group(2)}}}}}'
+        result = _parse_tool_json(repaired)
+        if result:
+            return result
+
+    return None
+
+
+# ── Tool definitions + prompt ───────────────────────────────────────────────
+
+CORE_TOOLS = [
+    {"name": "read", "description": "Read file", "parameters": {"path": "string"}},
+    {
+        "name": "write",
+        "description": "Write file",
+        "parameters": {"path": "string", "content": "string"},
+    },
+    {
+        "name": "edit",
+        "description": "Edit file (find and replace)",
+        "parameters": {"path": "string", "old": "string", "new": "string"},
+    },
+    {"name": "exec", "description": "Run shell command", "parameters": {"command": "string"}},
+    {
+        "name": "web_fetch",
+        "description": "Fetch URL content",
+        "parameters": {"url": "string"},
+    },
+    {
+        "name": "web_search",
+        "description": "Search the web",
+        "parameters": {"query": "string"},
+    },
+]
+
+_TOOL_DEFS_JSON = json.dumps(CORE_TOOLS, ensure_ascii=False)
+
+_TOOL_EXAMPLE = (
+    "Example: to read a file named test.txt, return:\n"
+    "```tool_json\n"
+    '{"tool":"read","parameters":{"path":"test.txt"}}\n'
+    "```\n"
+    "(read is a real tool, this is just a format example)"
 )
 
+_TOOL_PROMPT = f"""Tools: {_TOOL_DEFS_JSON}
 
-def _tools_to_system(tools: list, base_system: str) -> str:
+{_TOOL_EXAMPLE}
+
+Your actual tools are listed above. To use one, reply ONLY with the tool_json block.
+No tool needed? Answer directly.
+"""
+
+# Tool-related keywords for selective injection (en + zh)
+_TOOL_KEYWORDS = [
+    "file", "read", "write", "edit", "exec", "run", "command", "shell",
+    "search", "fetch", "url", "http", "download", "install", "update",
+    "文件", "读取", "写入", "编辑", "执行", "运行", "命令", "终端",
+    "搜索", "查找", "查询", "抓取", "网页", "下载", "安装", "更新",
+    "帮我", "查看", "看看", "检查",
+]
+
+
+def _needs_tool_injection(message: str) -> bool:
+    lower = message.lower()
+    return any(kw in lower for kw in _TOOL_KEYWORDS)
+
+
+def _build_system_prompt(tools: list, base_system: str) -> str:
+    """Build system prompt with tool instructions injected."""
     if not tools:
         return base_system
 
@@ -85,42 +230,223 @@ def _tools_to_system(tools: list, base_system: str) -> str:
 
     tool_block = "\n".join(lines)
     injection = (
-        "You have access to these tools:\n"
-        f"{tool_block}\n\n"
-        "When you need to call a tool, you MUST output EXACTLY this XML format "
+        f"You have access to these tools:\n{tool_block}\n\n"
+        "When you need to call a tool, you MUST output EXACTLY this format "
         "and nothing else:\n"
-        "<tool_call_request>\n"
-        "  <name>tool_name_here</name>\n"
-        '  <arguments>{"param": "value"}</arguments>\n'
-        "</tool_call_request>\n\n"
+        "```tool_json\n"
+        '{"tool":"tool_name_here","parameters":{"param":"value"}}\n'
+        "```\n\n"
         "When you want to reply with plain text (no tool call), just write normally.\n"
         "You may ONLY call one tool per response."
     )
     return f"{base_system}\n\n{injection}" if base_system else injection
 
 
-def _parse_output(raw: str) -> ToolCallOutput | TextOutput:
-    # Try XML format first
-    m = XML_RE.search(raw)
-    if m:
-        name = m.group(1).strip()
-        try:
-            args = json.loads(m.group(2).strip())
-        except json.JSONDecodeError:
-            args = {}
-        return ToolCallOutput(name=name, arguments=args)
+# ── Tool execution ──────────────────────────────────────────────────────────
 
-    # Try JSON format
-    m = JSON_RE.search(raw)
-    if m:
-        name = m.group(1).strip()
-        try:
-            args = json.loads(m.group(2).strip())
-        except json.JSONDecodeError:
-            args = {}
-        return ToolCallOutput(name=name, arguments=args)
 
-    return TextOutput(text=raw)
+def _exec_read(path: str) -> str:
+    # Support both absolute and relative paths
+    p = Path(path)
+    if not p.is_absolute():
+        p = WORKSPACE / path
+
+    if not p.exists():
+        return f"Error: file not found: {path}"
+    if not p.is_file():
+        return f"Error: not a file: {path}"
+    try:
+        content = p.read_text(encoding="utf-8")
+        if len(content) > 50_000:
+            content = content[:50_000] + "\n... (truncated)"
+        return content
+    except Exception as e:
+        return f"Error reading {path}: {e}"
+
+
+def _exec_write(path: str, content: str) -> str:
+    # Support both absolute and relative paths
+    p = Path(path)
+    if not p.is_absolute():
+        p = WORKSPACE / path
+
+    try:
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(content, encoding="utf-8")
+        return f"OK: wrote {len(content)} bytes to {path}"
+    except Exception as e:
+        return f"Error writing {path}: {e}"
+
+
+def _exec_edit(path: str, old: str, new: str) -> str:
+    # Support both absolute and relative paths
+    p = Path(path)
+    if not p.is_absolute():
+        p = WORKSPACE / path
+
+    if not p.exists():
+        return f"Error: file not found: {path}"
+    try:
+        content = p.read_text(encoding="utf-8")
+        if old not in content:
+            return f"Error: old string not found in {path}"
+        count = content.count(old)
+        content = content.replace(old, new)
+        p.write_text(content, encoding="utf-8")
+        return f"OK: replaced {count} occurrence(s) in {path}"
+    except Exception as e:
+        return f"Error editing {path}: {e}"
+
+
+async def _exec_command(command: str) -> str:
+    try:
+        proc = await asyncio.create_subprocess_shell(
+            command,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            cwd=str(WORKSPACE),
+        )
+        stdout, stderr = await asyncio.wait_for(
+            proc.communicate(), timeout=EXEC_TIMEOUT
+        )
+        output = stdout.decode("utf-8", errors="replace")
+        err = stderr.decode("utf-8", errors="replace")
+        result = ""
+        if output:
+            result += output
+        if err:
+            result += ("\n" if result else "") + err
+        if proc.returncode != 0:
+            result += f"\n(exit code: {proc.returncode})"
+        if len(result) > 50_000:
+            result = result[:50_000] + "\n... (truncated)"
+        return result or "(no output)"
+    except asyncio.TimeoutError:
+        return f"Error: command timed out after {EXEC_TIMEOUT}s"
+    except Exception as e:
+        return f"Error executing command: {e}"
+
+
+def _exec_web_fetch(url: str) -> str:
+    try:
+        req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            data = resp.read(200_000).decode("utf-8", errors="replace")
+            if len(data) > 50_000:
+                data = data[:50_000] + "\n... (truncated)"
+            return data
+    except Exception as e:
+        return f"Error fetching {url}: {e}"
+
+
+def _exec_web_search(query: str) -> str:
+    """Web search via DuckDuckGo lite (no API key needed)."""
+    try:
+        q = urllib.parse.quote(query)
+        url = f"https://lite.duckduckgo.com/lite/?q={q}"
+        req = urllib.request.Request(
+            url, headers={"User-Agent": "Mozilla/5.0"}
+        )
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            html = resp.read(100_000).decode("utf-8", errors="replace")
+        # Extract snippets from DuckDuckGo lite HTML
+        results = []
+        for m in re.finditer(
+            r'class="result-snippet">(.*?)</td>', html, re.DOTALL
+        ):
+            snippet = re.sub(r"<[^>]+>", "", m.group(1)).strip()
+            if snippet:
+                results.append(snippet)
+        if not results:
+            # Fallback: extract all text
+            text = re.sub(r"<[^>]+>", " ", html)
+            text = re.sub(r"\s+", " ", text).strip()
+            return text[:5000] if text else "No search results found."
+        return "\n\n".join(results[:5])
+    except Exception as e:
+        return f"Error searching: {e}"
+
+
+async def execute_tool(name: str, arguments: dict) -> str:
+    """Execute a tool by name and return the result as a string."""
+    logger.info(f"  Executing tool: {name} with args: {arguments}")
+    try:
+        if name == "read":
+            path = arguments.get("path", "")
+            logger.debug(f"    Reading file: {path}")
+            result = _exec_read(path)
+            logger.debug(f"    Read result: {result[:200]}")
+            return result
+        elif name == "write":
+            path = arguments.get("path", "")
+            content = arguments.get("content", "")
+            logger.debug(f"    Writing to file: {path} ({len(content)} bytes)")
+            return _exec_write(path, content)
+        elif name == "edit":
+            path = arguments.get("path", "")
+            logger.debug(f"    Editing file: {path}")
+            return _exec_edit(
+                path,
+                arguments.get("old", ""),
+                arguments.get("new", ""),
+            )
+        elif name == "exec":
+            cmd = arguments.get("command", "")
+            logger.debug(f"    Executing command: {cmd}")
+            return await _exec_command(cmd)
+        elif name == "web_fetch":
+            url = arguments.get("url", "")
+            logger.debug(f"    Fetching URL: {url}")
+            return _exec_web_fetch(url)
+        elif name == "web_search":
+            query = arguments.get("query", "")
+            logger.debug(f"    Searching: {query}")
+            return _exec_web_search(query)
+        else:
+            return f"Error: unknown tool '{name}'"
+    except Exception as e:
+        logger.error(f"  Tool execution error: {e}", exc_info=True)
+        return f"Error executing tool '{name}': {e}"
+
+
+# ── Response conversion ─────────────────────────────────────────────────────
+
+
+def _to_anthropic_response(tool_call: dict | None, text: str, model: str) -> dict:
+    msg_id = f"msg_{uuid.uuid4().hex[:24]}"
+
+    if tool_call:
+        return {
+            "id": msg_id,
+            "type": "message",
+            "role": "assistant",
+            "model": model,
+            "content": [
+                {
+                    "type": "tool_use",
+                    "id": f"toolu_{uuid.uuid4().hex[:24]}",
+                    "name": tool_call["name"],
+                    "input": tool_call["arguments"],
+                }
+            ],
+            "stop_reason": "tool_use",
+            "stop_sequence": None,
+            "usage": {"input_tokens": 0, "output_tokens": 0},
+        }
+
+    return {
+        "id": msg_id,
+        "type": "message",
+        "role": "assistant",
+        "model": model,
+        "content": [{"type": "text", "text": text}],
+        "stop_reason": "end_turn",
+        "stop_sequence": None,
+        "usage": {"input_tokens": 0, "output_tokens": 0},
+    }
+
+
+# ── History conversion ──────────────────────────────────────────────────────
 
 
 def _to_pydantic_history(
@@ -128,7 +454,7 @@ def _to_pydantic_history(
 ) -> tuple[list[ModelMessage], str]:
     """Convert Anthropic messages to PydanticAI history.
 
-    All tool-related content is flattened to plain text because the
+    Flattens tool-related content to plain text because the
     reverse API doesn't support native tool calls.
     """
     history: list[ModelMessage] = []
@@ -183,41 +509,83 @@ def _to_pydantic_history(
     return history, ""
 
 
-def _to_anthropic_response(output: ToolCallOutput | TextOutput, model: str) -> dict:
-    msg_id = f"msg_{uuid.uuid4().hex[:24]}"
-
-    if isinstance(output, ToolCallOutput):
-        return {
-            "id": msg_id,
-            "type": "message",
-            "role": "assistant",
-            "model": model,
-            "content": [
-                {
-                    "type": "tool_use",
-                    "id": f"toolu_{uuid.uuid4().hex[:24]}",
-                    "name": output.name,
-                    "input": output.arguments,
-                }
-            ],
-            "stop_reason": "tool_use",
-            "stop_sequence": None,
-            "usage": {"input_tokens": 0, "output_tokens": 0},
-        }
-
-    return {
-        "id": msg_id,
-        "type": "message",
-        "role": "assistant",
-        "model": model,
-        "content": [{"type": "text", "text": output.text}],
-        "stop_reason": "end_turn",
-        "stop_sequence": None,
-        "usage": {"input_tokens": 0, "output_tokens": 0},
-    }
+# ── Agentic loop ────────────────────────────────────────────────────────────
 
 
-# ── Route ──────────────────────────────────────────────────────────────────────
+async def _call_model(
+    prompt: str,
+    history: list[ModelMessage],
+    system_prompt: str,
+) -> str:
+    """Call the reverse API via PydanticAI and return raw text."""
+    provider = OpenAIProvider(base_url=REVERSE_BASE_URL, api_key=REVERSE_API_KEY)
+    model = OpenAIChatModel(REVERSE_MODEL, provider=provider)
+    agent = Agent(model, output_type=str, system_prompt=system_prompt)
+    result = await agent.run(prompt, message_history=history)
+    return result.output
+
+
+async def _agentic_loop(
+    prompt: str,
+    history: list[ModelMessage],
+    system_prompt: str,
+    model_id: str,
+) -> tuple[dict | None, str]:
+    """Run the agentic loop: call model, check for tool calls, execute, repeat.
+
+    Returns (tool_call_for_response, final_text).
+    If the model calls a tool, executes it, feeds back, and loops.
+    The returned tool_call is the LAST one (for the Anthropic response).
+    """
+    current_prompt = prompt
+    current_history = list(history)
+    last_tool_call = None
+    accumulated_text = ""
+
+    for round_num in range(MAX_TOOL_ROUNDS):
+        logger.debug("  agentic loop round %d/%d", round_num + 1, MAX_TOOL_ROUNDS)
+
+        raw = await _call_model(current_prompt, current_history, system_prompt)
+        logger.debug("    raw (%d chars): %.200s", len(raw), raw)
+
+        tool_call = extract_tool_call(raw)
+
+        if tool_call is None:
+            # No tool call — model is done
+            return None, raw
+
+        logger.info(
+            "    tool_call: %s(%s)",
+            tool_call["name"],
+            json.dumps(tool_call["arguments"], ensure_ascii=False)[:200],
+        )
+
+        # Execute the tool
+        result = await execute_tool(tool_call["name"], tool_call["arguments"])
+        logger.debug("    tool result (%d chars): %.200s", len(result), result)
+
+        # Feed result back as a user message
+        feedback = (
+            f"Tool {tool_call['name']} returned:\n{result}\n\n"
+            "Please continue answering based on this result."
+        )
+
+        current_history.append(
+            ModelResponse(parts=[TextPart(content=raw)])
+        )
+        current_history.append(
+            ModelRequest(parts=[UserPromptPart(content=feedback)])
+        )
+        current_prompt = feedback
+        last_tool_call = tool_call
+        accumulated_text = raw
+
+    # Hit max rounds — return whatever we have
+    logger.warning("  agentic loop hit max rounds (%d)", MAX_TOOL_ROUNDS)
+    return last_tool_call, accumulated_text or "Max tool rounds reached."
+
+
+# ── Route ───────────────────────────────────────────────────────────────────
 
 
 @app.post("/v1/messages")
@@ -237,7 +605,7 @@ async def handle_messages(request: Request):
     if tools:
         logger.debug("  tool names: %s", [t.get("name") for t in tools])
 
-    system_prompt = _tools_to_system(
+    system_prompt = _build_system_prompt(
         tools, system if isinstance(system, str) else ""
     )
     history, last_prompt = _to_pydantic_history(msgs)
@@ -245,37 +613,33 @@ async def handle_messages(request: Request):
     if not last_prompt:
         last_prompt = "Continue."
 
+    # Check if we should inject the compact tool prompt into the user message
+    # (for models that don't receive system messages well)
+    if tools and _needs_tool_injection(last_prompt):
+        last_prompt = _TOOL_PROMPT + last_prompt
+
     logger.debug(
         "  history turns=%d  last_prompt=%s",
         len(history),
         last_prompt[:120] + ("..." if len(last_prompt) > 120 else ""),
     )
 
-    provider = OpenAIProvider(
-        base_url=REVERSE_BASE_URL, api_key=REVERSE_API_KEY
+    # Run the agentic loop
+    tool_call, text = await _agentic_loop(
+        last_prompt, history, system_prompt, model_id
     )
-    model = OpenAIChatModel(REVERSE_MODEL, provider=provider)
-    agent = Agent(model, output_type=str, system_prompt=system_prompt)
 
-    result = await agent.run(last_prompt, message_history=history)
-    raw = result.output
-
-    logger.debug("  raw response (%d chars): %.200s", len(raw), raw)
-
-    output = _parse_output(raw)
-    if isinstance(output, ToolCallOutput):
+    if tool_call:
         logger.info(
-            "<<< response tool_call  name=%s  args_keys=%s",
-            output.name,
-            list(output.arguments.keys()) if output.arguments else [],
+            "<<< response tool_call  name=%s  args=%s",
+            tool_call["name"],
+            json.dumps(tool_call["arguments"], ensure_ascii=False)[:200],
         )
     else:
-        logger.info(
-            "<<< response text (%d chars): %.120s",
-            len(output.text),
-            output.text + ("..." if len(output.text) > 120 else ""),
-        )
-    return JSONResponse(_to_anthropic_response(output, model_id))
+        preview = text[:120] + ("..." if len(text) > 120 else "")
+        logger.info("<<< response text (%d chars): %s", len(text), preview)
+
+    return JSONResponse(_to_anthropic_response(tool_call, text, model_id))
 
 
 if __name__ == "__main__":
@@ -287,6 +651,12 @@ if __name__ == "__main__":
         datefmt="%H:%M:%S",
     )
     logger.info(
-        "Starting gateway on :%d  model=%s", GATEWAY_PORT, REVERSE_MODEL
+        "Starting gateway on :%d  model=%s  max_tool_rounds=%d",
+        GATEWAY_PORT,
+        REVERSE_MODEL,
+        MAX_TOOL_ROUNDS,
     )
+    logger.info(f"Workspace: {WORKSPACE.absolute()}")
+    logger.info(f"Tool execution timeout: {EXEC_TIMEOUT}s")
     uvicorn.run(app, host="0.0.0.0", port=GATEWAY_PORT)
+

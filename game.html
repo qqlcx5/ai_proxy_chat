@@ -1,0 +1,95 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>躲避方块小游戏</title>
+<style>
+/* 页面样式 */
+* { box-sizing: border-box; }
+body { margin: 0; display: flex; justify-content: center; align-items: center; height: 100vh; background: linear-gradient(135deg, #0f172a, #1e293b); font-family: Arial, sans-serif; color: white; }
+canvas { border: 3px solid #38bdf8; border-radius: 18px; background: #020617; }
+button { margin-top: 12px; padding: 10px 18px; border: 0; border-radius: 999px; background: #38bdf8; color: #020617; cursor: pointer; font-weight: bold; }
+button:hover { background: #7dd3fc; }
+</style>
+</head>
+<body>
+<div>
+<h1>躲避方块</h1>
+<canvas id="game" width="520" height="360"></canvas>
+<button onclick="restartGame()">重新开始</button>
+</div>
+<script>
+// 游戏核心变量
+const canvas = document.getElementById('game');
+const ctx = canvas.getContext('2d');
+let keys = new Set();
+let player, enemies, score, best, running, spawnTimer, lastTime;
+best = Number(localStorage.getItem('dodgeBest')||0);
+
+// 初始化游戏
+function reset() {
+  player = { x: canvas.width/2-12, y: canvas.height-48, size:24, speed:230 };
+  enemies = [];
+  score = 0;
+  running = true;
+  spawnTimer = 0;
+  lastTime = performance.now();
+  requestAnimationFrame(loop);
+}
+function restartGame() { reset(); }
+
+// 生成敌人
+function spawnEnemy() {
+  const size = 18+Math.random()*24;
+  enemies.push({ x: Math.random()*(canvas.width-size), y:-size, size, speed:110+Math.random()*130+score*0.02 });
+}
+
+// 更新游戏状态
+function update(dt){
+  if(keys.has('ArrowLeft')||keys.has('a')) player.x -= player.speed*dt;
+  if(keys.has('ArrowRight')||keys.has('d')) player.x += player.speed*dt;
+  if(keys.has('ArrowUp')||keys.has('w')) player.y -= player.speed*dt;
+  if(keys.has('ArrowDown')||keys.has('s')) player.y += player.speed*dt;
+  player.x = Math.max(0, Math.min(canvas.width-player.size, player.x));
+  player.y = Math.max(0, Math.min(canvas.height-player.size, player.y));
+
+  spawnTimer += dt;
+  if(spawnTimer>Math.max(0.18,0.65-score/20000)){ spawnEnemy(); spawnTimer=0; }
+
+  for(const e of enemies) e.y += e.speed*dt;
+  enemies = enemies.filter(e=>e.y<canvas.height+e.size);
+
+  for(const e of enemies){
+    if(player.x<e.x+e.size && player.x+player.size>e.x && player.y<e.y+e.size && player.y+player.size>e.y){
+      running=false; best=Math.max(best,Math.floor(score)); localStorage.setItem('dodgeBest',best);
+    }
+  }
+  score+=dt*100;
+}
+
+// 绘制游戏
+function draw(){
+  ctx.clearRect(0,0,canvas.width,canvas.height);
+  ctx.fillStyle='#22c55e'; ctx.fillRect(player.x,player.y,player.size,player.size);
+  ctx.fillStyle='#ef4444'; for(const e of enemies) ctx.fillRect(e.x,e.y,e.size,e.size);
+  ctx.fillStyle='white'; ctx.font='18px Arial'; ctx.fillText('分数:'+Math.floor(score),16,28); ctx.fillText('最高:'+best,16,52);
+  if(!running){ ctx.fillStyle='rgba(0,0,0,0.65)'; ctx.fillRect(0,0,canvas.width,canvas.height);
+  ctx.fillStyle='white'; ctx.font='34px Arial'; ctx.textAlign='center'; ctx.fillText('游戏结束',canvas.width/2,canvas.height/2-16);
+  ctx.font='18px Arial'; ctx.fillText('点击“重新开始”再来一局',canvas.width/2,canvas.height/2+22); ctx.textAlign='left'; }
+}
+
+// 游戏循环
+function loop(now){
+  const dt=Math.min((now-lastTime)/1000,0.033); lastTime=now;
+  if(running) update(dt);
+  draw();
+  if(running) requestAnimationFrame(loop);
+}
+
+window.addEventListener('keydown',e=>keys.add(e.key));
+window.addEventListener('keyup',e=>keys.delete(e.key));
+reset();
+</script>
+</body>
+</html>
