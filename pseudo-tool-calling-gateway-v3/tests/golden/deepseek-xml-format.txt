@@ -1,0 +1,1 @@
+<tool_call>{"name":"read","arguments":{"path":"README.md"}}</tool_call>

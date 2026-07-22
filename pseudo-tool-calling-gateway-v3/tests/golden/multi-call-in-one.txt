@@ -1,0 +1,11 @@
+I'll read the file for you.
+
+```tool_json
+{"tool":"read","parameters":{"path":"README.md"}}
+```
+
+Now let me also check the package.json:
+
+```tool_json
+{"tool":"read","parameters":{"path":"package.json"}}
+```

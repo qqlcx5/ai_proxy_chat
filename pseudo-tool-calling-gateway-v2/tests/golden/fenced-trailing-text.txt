@@ -1,0 +1,5 @@
+```tool_json
+{"tool":"exec","parameters":{"command":"ls"}}
+```
+
+Let me run that.

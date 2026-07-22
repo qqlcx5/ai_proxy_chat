@@ -1,0 +1,1 @@
+I'll fetch the file.<tool_call>{"name":"read","arguments":{"path":"src/index.ts"}}</tool_call>

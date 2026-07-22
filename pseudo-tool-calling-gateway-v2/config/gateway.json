@@ -1,0 +1,11 @@
+{
+  "host": "127.0.0.1",
+  "port": 8787,
+  "log_level": "info",
+  "upstream": {
+    "base_url": "http://66.154.117.189:3000/v1",
+    "api_key": "${UPSTREAM_API_KEY}",
+    "timeout_sec": 120,
+    "retries": 2
+  }
+}

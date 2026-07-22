@@ -1,0 +1,35 @@
+{
+  "name": "pseudo-tool-calling-gateway",
+  "version": "0.1.0",
+  "description": "Local HTTP gateway that fakes native tool calling for reverse-proxy LLM APIs, enabling pi / Claude Code / Codex to use them.",
+  "type": "module",
+  "main": "dist/index.js",
+  "bin": {
+    "pseudo-tool-gateway": "dist/index.js"
+  },
+  "scripts": {
+    "build": "tsdown",
+    "dev": "tsx watch src/index.ts",
+    "start": "node dist/index.js",
+    "gateway": "tsx src/index.ts",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest"
+  },
+  "engines": {
+    "node": ">=22.12"
+  },
+  "dependencies": {
+    "hono": "^4.6.0",
+    "@hono/node-server": "^1.13.0"
+  },
+  "devDependencies": {
+    "typescript": "^5.6.0",
+    "tsx": "^4.19.0",
+    "tsdown": "^0.10.0",
+    "vitest": "^2.1.0",
+    "@types/node": "^22.0.0",
+    "@anthropic-ai/sdk": "^0.32.0",
+    "openai": "^4.77.0"
+  }
+}

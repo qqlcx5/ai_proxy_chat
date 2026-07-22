@@ -1,0 +1,6 @@
+{
+  "family": "gpt",
+  "injection_mode": "always",
+  "max_history_rounds": 6,
+  "truncate_chars": 2000
+}

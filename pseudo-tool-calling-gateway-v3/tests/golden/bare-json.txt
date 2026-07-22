@@ -1,0 +1,1 @@
+{"tool":"read","parameters":{"path":"README.md"},"call_id":null}

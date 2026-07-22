@@ -1,0 +1,1 @@
+Sure, here you go: {"tool":"write","parameters":{"path":"a.txt","content":"hi"}}, done.

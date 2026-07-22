@@ -1,0 +1,5 @@
+[
+  { "id": "gpt-5.6-luna", "upstreamModel": "gpt-5.6-luna-¥40/1M" },
+  { "id": "gpt-5.6-sol",  "upstreamModel": "gpt-5.6-sol-¥217/1M" },
+  { "id": "gpt-5.5",      "upstreamModel": "gpt-5.5-107¥/1M" }
+]

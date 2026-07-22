@@ -1,0 +1,37 @@
+# GPT Profile — shared by gpt-5.6-luna, gpt-5.6-sol, gpt-5.5
+# This file configures how the gateway handles tool injection for GPT models.
+
+[profile]
+inject_mode = "always"           # always | never | auto
+inject_position = "system"       # system | prepend_user
+teaching_examples = true         # include teaching example in prompt
+format_hint = "fenced_json"      # fenced_json | bare_json | xml
+
+[profile.repair]
+truncated_json = true            # repair missing closing braces
+mixed_formats = true             # handle mixed format outputs
+fenced_code_lang = ["tool_json", "json", "tool_call"]
+
+[profile.upstream]
+# The gateway will use these defaults if not overridden per-model
+stream = true
+timeout_sec = 120
+retry_max = 2
+retry_backoff = "exponential"    # linear | exponential | fixed
+
+# ─── Models ──────────────────────────────────────────────────────────
+
+[[models]]
+id = "gpt-5.6-luna"
+upstream_model = "gpt-5.6-luna"
+profile = "gpt"
+
+[[models]]
+id = "gpt-5.6-sol"
+upstream_model = "gpt-5.6-sol"
+profile = "gpt"
+
+[[models]]
+id = "gpt-5.5"
+upstream_model = "gpt-5.5"
+profile = "gpt"

@@ -1,0 +1,3 @@
+```tool_json
+{"tool":"read","parameters":{"path":"README.md"}}
+```
