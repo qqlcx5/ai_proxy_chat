@@ -43,8 +43,9 @@ function loadModels(): ModelMapping[] {
     });
   }
   return [
-    { id: "gpt-5.6-luna", upstreamModel: "gpt-5.6-luna-¥40/1M" },
-    { id: "gpt-5.6-sol", upstreamModel: "gpt-5.6-sol-¥217/1M" },
-    { id: "gpt-5.5", upstreamModel: "gpt-5.5-107¥/1M" },
+    { id: "gpt-5.6-luna", upstreamModel: "gpt-5.6-luna" },
+    { id: "gpt-5.6-sol", upstreamModel: "gpt-5.6-sol" },
+    { id: "gpt-5.5", upstreamModel: "gpt-5.5" },
+    { id: "gemini-3.1-pro-preview-thinking", upstreamModel: "gemini-3.1-pro-preview-thinking" },
   ];
 }
